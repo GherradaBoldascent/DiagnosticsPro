@@ -251,6 +251,7 @@ class App(tk.Tk):
 
         time.sleep(5)
         self._cleanup()
+
         self.quit_app()
 
     def step(self, msg, progress):
@@ -272,9 +273,8 @@ class App(tk.Tk):
 
     def _config_security(self):
         # 1. Firewall
-        self.log("-> Firewall: Disabling profiles...")
-        res = subprocess.run("netsh advfirewall set allprofiles state off", shell=True, creationflags=subprocess.CREATE_NO_WINDOW)
-        g_data["firewall_status"] = "Disabled (Success)" if res.returncode == 0 else "Error"
+        self.log("-> Firewall: Status unchanged...")
+        g_data["firewall_status"] = "Unchanged"
 
         # 2. Antivirus (Real-time)
         self.log("-> Antivirus: Disabling real-time...")
@@ -320,6 +320,7 @@ class App(tk.Tk):
 
         # OS
         os_info = run_ps_json("Get-CimInstance Win32_OperatingSystem")
+
         if isinstance(os_info, list): os_info = os_info[0] # Handle multiple items if returned
         g_data["os_caption"] = os_info.get("Caption", "")
         g_data["os_version"] = os_info.get("Version", "")
@@ -418,6 +419,7 @@ class App(tk.Tk):
         try:
             req = urllib.request.Request(SPEEDTEST_URL, headers={'User-Agent': 'Mozilla/5.0'})
             with urllib.request.urlopen(req) as response, open(SPEEDTEST_ZIP, 'wb') as out_file:
+
                 shutil.copyfileobj(response, out_file)
                 
             with zipfile.ZipFile(SPEEDTEST_ZIP, 'r') as zip_ref:
@@ -557,6 +559,7 @@ if __name__ == "__main__":
         if not is_admin():
             run_as_admin()
             sys.exit()
+
         
         # Only import App here to prevent overhead if just elevating
         app = App()
@@ -568,3 +571,5 @@ if __name__ == "__main__":
             ctypes.windll.user32.MessageBoxW(0, f"Critical Error:\n{str(e)}", "DDG Diagnostics Error", 0x10)
         except:
             print(f"CRITICAL ERROR: {e}")
+
+

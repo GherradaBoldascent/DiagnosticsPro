@@ -7,17 +7,20 @@
   Migracion 1:1 de PreRequisitesDDG.py a PowerShell 5.1 nativo (compatible Win10 y Win11).
   Pensado para ejecucion masiva mundial con internet, una sola linea, sin .exe ni Python.
 
-.USO - UNA SOLA LINEA (PowerShell como Administrador):
-  irm https://raw.githubusercontent.com/TU_USUARIO/DiagnosticsPro/develop/DDG-Diagnostics.ps1 | iex
-
-  Si ExecutionPolicy bloquea:
-  powershell -NoProfile -ExecutionPolicy Bypass -Command "irm 'https://raw.githubusercontent.com/TU_USUARIO/DiagnosticsPro/develop/DDG-Diagnostics.ps1' | iex"
+.USO - UNA SOLA LINEA (PowerShell como Administrador, sin anidar powershell.exe):
+  Set-ExecutionPolicy Bypass -Scope Process -Force
+  irm https://raw.githubusercontent.com/GherradaBoldascent/DiagnosticsPro/develop/DDG-Diagnostics.ps1 | iex
 
   Con parametros (estilo winutil):
-  & ([ScriptBlock]::Create((irm 'https://raw.githubusercontent.com/TU_USUARIO/DiagnosticsPro/develop/DDG-Diagnostics.ps1'))) -Silent
+  & ([ScriptBlock]::Create((irm 'https://raw.githubusercontent.com/GherradaBoldascent/DiagnosticsPro/develop/DDG-Diagnostics.ps1'))) -Silent
 
   Variables de entorno (util cuando se usa irm | iex sin parametros):
   $env:DDG_Silent='1'; $env:DDG_ReportDir='C:\1'; irm <url> | iex
+
+  Internet lento / se queda colgado:
+  $env:DDG_Fast='1'; irm <url> | iex   # omite speedtest, timeouts cortos
+  $env:DDG_NoSpeedtest='1'; irm <url> | iex
+  $env:DDG_NoPower='1'; irm <url> | iex       # salta powercfg si se cuelga ahi
 
 .PARAMETER ReportDir
   Carpeta del reporte. Por defecto C:\1 (o $env:DDG_ReportDir).
@@ -31,15 +34,27 @@
 .PARAMETER NoSpeedtest
   Omite descarga/ejecucion de Ookla (util en redes lentas o sin internet completa).
 
+.PARAMETER NoPower
+  Omite powercfg/hibernacion (si se cuelga en "High Performance").
+
+.PARAMETER NoSecurity
+  Omite cambios Defender/UAC/SmartScreen.
+
+.PARAMETER Fast
+  Modo internet lento: implica NoSpeedtest + timeouts de red cortos.
+
 .NOTES
   Requiere: Windows 10/11, PowerShell 5.1+, Administrador, Internet.
-  Version: 7.0 PS Edition (port de 6.1 Pro Edition)
+  Version: 7.1 PS Edition (port de 6.1 Pro Edition)
 #>
 param(
   [string]$ReportDir = "",
   [switch]$Silent,
   [switch]$NoNotepad,
-  [switch]$NoSpeedtest
+  [switch]$NoSpeedtest,
+  [switch]$NoPower,
+  [switch]$NoSecurity,
+  [switch]$Fast
 )
 
 # Permite configurar via entorno cuando se invoca con irm | iex
@@ -50,12 +65,19 @@ if ([string]::IsNullOrWhiteSpace($ReportDir)) {
 if ($env:DDG_Silent -eq "1") { $Silent = $true }
 if ($env:DDG_NoNotepad -eq "1") { $NoNotepad = $true }
 if ($env:DDG_NoSpeedtest -eq "1") { $NoSpeedtest = $true }
+if ($env:DDG_NoPower -eq "1") { $NoPower = $true }
+if ($env:DDG_NoSecurity -eq "1") { $NoSecurity = $true }
+if ($env:DDG_Fast -eq "1") { $Fast = $true }
+if ($Fast) { $NoSpeedtest = $true }
 if ($Silent) { $NoNotepad = $true }
+$DDG_NetTimeout = 10
+if ($Fast) { $DDG_NetTimeout = 5 }
+if ($env:DDG_NetTimeout -match '^\d+$') { $DDG_NetTimeout = [int]$env:DDG_NetTimeout }
 
 # =================================================================================
 # CONFIGURACION GLOBAL
 # =================================================================================
-$ScriptVersion = "7.0 PS Edition (port 6.1 Pro)"
+$ScriptVersion = "7.1 PS Edition (port 6.1 Pro)"
 # Concatenacion manual (no Join-Path) para evitar validacion de unidad C: en Linux/CI; en Windows funciona igual
 $ReportFile   = ($ReportDir.TrimEnd('\','/') + "\SystemInfo.txt")
 $baseTemp = $env:TEMP
@@ -133,35 +155,77 @@ function Get-FirstOrSelf {
 }
 
 # =================================================================================
-# 1. ENERGIA
+# 1. ENERGIA (con timeout: powercfg a veces se cuelga en VMs / planes corruptos)
 # =================================================================================
+function Invoke-ProcessTimeout {
+  param([string]$File, [string]$Args, [int]$TimeoutSec = 15)
+  try {
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $File
+    $psi.Arguments = $Args
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $p = New-Object System.Diagnostics.Process
+    $p.StartInfo = $psi
+    [void]$p.Start()
+    if ($p.WaitForExit($TimeoutSec * 1000)) { return $p.ExitCode }
+    try { $p.Kill() } catch {}
+    Write-DDGLog "[Warn] Timeout ${TimeoutSec}s: $File $Args (se continua)"
+    return 999
+  } catch {
+    Write-DDGLog "[Warn] Exec $File : $($_.Exception.Message)"
+    return 998
+  }
+}
+
 function Invoke-DDGPower {
+  if ($NoPower) { Write-DDGLog "-> Power: omitido por parametro."; $Global:DDG.hibernation_status = "Skipped"; return }
   Write-DDGLog "-> Power: High Performance."
-  try { Start-Process -FilePath "powercfg" -ArgumentList "/change monitor-timeout-ac 0" -NoNewWindow -Wait -ErrorAction SilentlyContinue } catch {}
-  try { Start-Process -FilePath "powercfg" -ArgumentList "/change standby-timeout-ac 0" -NoNewWindow -Wait -ErrorAction SilentlyContinue } catch {}
+  Write-DDGLog "   - monitor-timeout-ac 0 ..."
+  $c1 = Invoke-ProcessTimeout "powercfg" "/change monitor-timeout-ac 0" 15
+  Write-DDGLog "   - standby-timeout-ac 0 ... (rc=$c1)"
+  $c2 = Invoke-ProcessTimeout "powercfg" "/change standby-timeout-ac 0" 15
 
   Write-DDGLog "-> Hibernation: Disabling..."
-  try {
-    $p = Start-Process -FilePath "powercfg" -ArgumentList "/h off" -NoNewWindow -Wait -PassThru -ErrorAction SilentlyContinue
-    if ($p.ExitCode -eq 0) { $Global:DDG.hibernation_status = "Disabled (Success)" }
-    else { $Global:DDG.hibernation_status = "Error while disabling" }
-  } catch { $Global:DDG.hibernation_status = "Error while disabling" }
+  $c3 = Invoke-ProcessTimeout "powercfg" "/h off" 20
+  if ($c3 -eq 0) { $Global:DDG.hibernation_status = "Disabled (Success)" }
+  elseif ($c3 -eq 999) { $Global:DDG.hibernation_status = "Timeout (skipped)" }
+  else { $Global:DDG.hibernation_status = "Error while disabling" }
 }
 
 # =================================================================================
 # 2. SEGURIDAD (replica comportamiento Python)
 # =================================================================================
 function Invoke-DDGSecurity {
+  if ($NoSecurity) {
+    Write-DDGLog "-> Security: omitido por parametro."
+    $Global:DDG.firewall_status = "Skipped"; $Global:DDG.av_status = "Skipped"
+    $Global:DDG.uac_status = "Skipped"; $Global:DDG.smartscreen_status = "Skipped"
+    return
+  }
   Write-DDGLog "-> Firewall: Status unchanged..."
   $Global:DDG.firewall_status = "Unchanged"
 
-  Write-DDGLog "-> Antivirus: Disabling real-time..."
+  Write-DDGLog "-> Antivirus: Disabling real-time... (timeout 25s)"
   try {
-    $r = $null
-    try { $r = Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction Stop; $Global:DDG.av_status = "Disabled (Requested)" }
-    catch { $Global:DDG.av_status = "Error (Possible Tamper Protection)" }
-    if ($null -eq $r -and $Global:DDG.av_status -eq "Pending") { $Global:DDG.av_status = "Disabled (Requested)" }
-  } catch { $Global:DDG.av_status = "Error (Possible Tamper Protection)" }
+    # Set-MpPreference puede colgarse con Tamper Protection: job con timeout
+    $j = Start-Job -ScriptBlock { Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction Stop } -ErrorAction Stop
+    $done = Wait-Job -Job $j -Timeout 25
+    if ($done) {
+      Receive-Job -Job $j -ErrorAction SilentlyContinue | Out-Null
+      $Global:DDG.av_status = "Disabled (Requested)"
+    } else {
+      try { Stop-Job -Job $j -ErrorAction SilentlyContinue } catch {}
+      $Global:DDG.av_status = "Timeout (Possible Tamper Protection)"
+      Write-DDGLog "[Warn] AV timeout 25s, se continua"
+    }
+    try { Remove-Job -Job $j -Force -ErrorAction SilentlyContinue } catch {}
+  } catch {
+    $Global:DDG.av_status = "Error (Possible Tamper Protection)"
+    Write-DDGLog "[Warn] AV: $($_.Exception.Message)"
+  }
 
   Write-DDGLog "-> UAC: Disabling (Reg)..."
   try {
@@ -270,7 +334,7 @@ function Invoke-DDGSystemInfo {
 # 4. RED / GEOLOCALIZACION (mundial, con fallback)
 # =================================================================================
 function Invoke-DDGNetworkInfo {
-  Write-DDGLog "-> Connecting to ipinfo.io..."
+  Write-DDGLog "-> Connecting to ipinfo.io... (timeout ${DDG_NetTimeout}s)"
   $Global:DDG.public_ip = "Error"
   $Global:DDG.city = "Unknown"
   $Global:DDG.country = ""
@@ -280,7 +344,7 @@ function Invoke-DDGNetworkInfo {
   foreach ($u in $urls) {
     if ($done) { break }
     try {
-      $req = Invoke-RestMethod -Uri $u -TimeoutSec 10 -UserAgent "Mozilla/5.0" -ErrorAction Stop
+      $req = Invoke-RestMethod -Uri $u -TimeoutSec $DDG_NetTimeout -UserAgent "Mozilla/5.0" -ErrorAction Stop
       if ($req.ip) {
         $Global:DDG.public_ip = $req.ip
         $Global:DDG.city = $req.city
@@ -294,7 +358,7 @@ function Invoke-DDGNetworkInfo {
   # Fallback mundial si ipinfo bloqueado por region/firewall
   if (-not $done) {
     try {
-      $fb = Invoke-RestMethod -Uri "http://ip-api.com/json/?fields=status,query,countryCode,city" -TimeoutSec 10 -UserAgent "Mozilla/5.0" -ErrorAction Stop
+      $fb = Invoke-RestMethod -Uri "http://ip-api.com/json/?fields=status,query,countryCode,city" -TimeoutSec $DDG_NetTimeout -UserAgent "Mozilla/5.0" -ErrorAction Stop
       if ($fb.status -eq "success") {
         $Global:DDG.public_ip = $fb.query
         $Global:DDG.city = $fb.city

@@ -69,8 +69,8 @@ $SpeedtestZip = ($TempDir.TrimEnd('\','/') + "\speedtest.zip")
 $SpeedtestExe = ($TempDir.TrimEnd('\','/') + "\speedtest.exe")
 
 # URL canonica para auto-elevacion cuando se usa irm | iex.
-# Repo real (origen git): DDG-Systems/DiagnosticsPro
-$DDG_SourceUrl = "https://raw.githubusercontent.com/DDG-Systems/DiagnosticsPro/develop/DDG-Diagnostics.ps1"
+# Repo publico personal para irm mundial sin auth
+$DDG_SourceUrl = "https://raw.githubusercontent.com/GherradaBoldascent/DiagnosticsPro/develop/DDG-Diagnostics.ps1"
 if (-not [string]::IsNullOrWhiteSpace($env:DDG_SourceUrl)) { $DDG_SourceUrl = $env:DDG_SourceUrl }
 
 $ErrorActionPreference = "Continue"
